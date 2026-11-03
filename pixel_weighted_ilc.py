@@ -104,9 +104,17 @@ def setup(mask, nside, cl, fwhm_deg=9.0, cutoff=1e-7, lmax=None, reg=None, spin=
     in the units of cl (e.g. white-noise variance, as in Anping's 2 noise^2 / pixel_area + reg_sigma^2)."""
     c = cmb_spectrum(nside, cl, fwhm_deg, lmax, cutoff if reg is None else 0.0, spin)
     m = mask > 0.5
-    return dict(c=c, m=m, nside=nside, reg=reg, spin=spin,
-                M1=mode_inverse(gram(m, c, nside), cutoff, reg),
-                M2=mode_inverse(gram(np.ones_like(m), c, nside), cutoff, reg))
+    G1, G2 = gram(m, c, nside), gram(np.ones_like(m), c, nside)   # the expensive part; independent of reg
+    return dict(c=c, m=m, nside=nside, reg=reg, spin=spin, cutoff=cutoff, G1=G1, G2=G2,
+                M1=mode_inverse(G1, cutoff, reg), M2=mode_inverse(G2, cutoff, reg))
+
+
+def with_reg(pre, reg):
+    """Copy of pre for a new reg: reuses the cached Gram matrices, redoes only the two inverses.
+    pre must come from setup(..., reg=<something>) so that c was built without the pinv cutoff."""
+    assert pre["reg"] is not None and reg is not None, "with_reg needs setup(reg=...) and a reg"
+    return dict(pre, reg=reg, M1=mode_inverse(pre["G1"], pre["cutoff"], reg),
+                M2=mode_inverse(pre["G2"], pre["cutoff"], reg))
 
 
 def method2_foreground_cleaning(maps, mask=None, nside=None, cl=None, fwhm_deg=9.0, cutoff=1e-7, lmax=None,
