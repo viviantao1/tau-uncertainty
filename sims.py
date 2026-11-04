@@ -1,10 +1,7 @@
-import matplotlib.pyplot as plt
 import numpy as np
 import healpy as hp
 import os
 import camb
-import multiprocessing as mp
-import pandas as pd
 from scipy.optimize import minimize
 from scipy.interpolate import CubicSpline
 from threadpoolctl import threadpool_limits
@@ -103,13 +100,15 @@ tau_grid = np.linspace(grid_min, grid_max, grid_size)
 
 EE_grid = EE_cubicspline(tau_grid)
 
-bins = xqml.Bins.fromdeltal(2, lmax_xqml, DELL)
+lmins = np.arange(2, lmax_xqml + 1 - DELL + 1, DELL)[:(lmax_xqml - 1) // DELL]
+lmaxs = lmins + DELL
+lmaxs[-1] = lmax_xqml + 1  # fromdeltal drops leftover ells, unmodelled power leaks into all bins
+bins = xqml.Bins(lmins, lmaxs)
 ell_xqml = np.arange(2, lmax_xqml+1)
 ell_bins_xqml = bins.lbin
 ell_index_xqml = np.array([np.where(ls_xqml == L)[0][0] for L in ell_xqml])
-# Dl=True means the input is already Dl = l(l+1)Cl/2pi, so convert before binning
 ell_grid = np.arange(EE_grid.shape[1])
-EE_grid_binned_xqml = bins.bin_spectra(EE_grid, Dl=True) # no weighting is done
+EE_grid_binned_xqml = bins.bin_spectra(EE_grid, Dl=True) # no weighting is done since function assumes input and output are both Dl
 
 EE_input_xqml = np.array(true_spectra_xqml[1][:lmax_xqml + 1], copy=True)
 EE_input_xqml[ell_xqml] = EE_cubicspline(0.054)[ell_xqml]
@@ -130,7 +129,7 @@ def create_mask (filename, class_mask=True, nside=nside_xqml):
 
 m16 = hp.read_map(filename)
 m128 = hp.read_map(filename128)
-mask = create_mask(filename, class_mask=True, nside=nside_xqml)
+# mask = create_mask(filename, class_mask=True, nside=nside_xqml)
 
 # ---------------------------------------------------------------- ILC + map generation
 def noise_calcs(noise, nside):
@@ -233,22 +232,22 @@ def downgrade(maps, fwhm_deg, nside_out):
     return np.vstack([np.zeros(hp.nside2npix(nside_out)), hp.alm2map_spin(alm, nside_out, 2, lmax)])
 
 # ---------------------------------------------------------------- xQML simulations
-def simulation_setup(noise, nside=nside_xqml):
+def simulation_setup(noise, mask, nside=nside_xqml, fwhm=0):
     sigma_pix, npix, _ = noise_calcs(noise, nside)
 
-    unmasked_pix = np.count_nonzero(m16)
+    unmasked_pix = np.count_nonzero(mask)
     NoiseVar = (sigma_pix**2 * np.eye(2*unmasked_pix))
     spec = ['EE','BB']
 
     esti = xqml.xQML(
-        m16,
-        m16,
+        mask,
+        mask,
         bins,
         clth_xqml,
         NA=NoiseVar,
         NB=NoiseVar,
         lmax=lmax_xqml,
-        fwhm=0,
+        fwhm=fwhm,
         spec=spec,
         pixwin=False
     )
@@ -281,7 +280,7 @@ def run_single_simulation(noise, nside_sim, nside_xqml, fwhm, icovariance_EE, es
 def run_full_simulations(noise, nside_sim, nside_xqml, fwhm, mask, num_simulations):
     tau_estimates, cls = [], []
 
-    esti, icovariance_EE = simulation_setup(noise, nside_xqml)
+    esti, icovariance_EE = simulation_setup(noise, mask, nside_xqml, fwhm)
 
     for i in range(num_simulations):
         tau_estimate, cl = run_single_simulation(noise, nside_sim, nside_xqml, fwhm, icovariance_EE, esti, mask, xqml=True)
@@ -306,19 +305,18 @@ def sigma_tau_plot(noises, nsim):
 def run_noise(args):
     n, seed, nsim, threads = args
     global pre                                   # ilc() reads the global `pre`
-    np.random.seed(seed)                         # forked workers would otherwise share one RNG state
+    np.random.seed(seed)
     sigma_pix, _, _ = noise_calcs(n, nside_sim)
     pre = pilc.with_reg(pre0, sigma_pix**2 + reg_sigma**2)
     with threadpool_limits(limits=threads):
         auto, cls = run_full_simulations(n, nside_sim, nside_xqml, 9, mask, nsim)
     return auto.std(), auto.mean() - 0.054, cls.mean(axis=0), cls.std(axis=0)
 
-def sigma_tau_plot_parallel(noises, nsim, workers=8, threads=2):
-    # check `uptime` first and keep workers * ~8 GB under free memory
+def sigma_tau_plot_parallel(noises, nsim, threads=2):
+    # runs one noise level at a time: forking after CAMB/pilc.setup used threads can hang
     seeds = np.random.SeedSequence(1234).spawn(len(noises))
     jobs = [(n, s.generate_state(1)[0], nsim, threads) for n, s in zip(noises, seeds)]
-    with mp.get_context("fork").Pool(workers, maxtasksperchild=1) as pool:  # fresh worker frees the ~2 GB xQML tensor
-        res = pool.map(run_noise, jobs, chunksize=1)
+    res = [run_noise(job) for job in jobs]
     return [np.array([r[i] for r in res]) for i in range(4)]   # sigma, bias, cl_mean, cl_std
 
 # ---------------------------------------------------------------- main
@@ -326,24 +324,20 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("filename", help="Name of the output .npz file")
     parser.add_argument("--save-spectra", action="store_true", help="also save mean/std of the binned EE spectrum per noise level")
+    parser.add_argument("--class-mask", action="store_true", help="add the CLASS declination cut")
     args = parser.parse_args()
-    
-    # Gram matrices built once in the parent; forked workers share them copy-on-write
+    os.makedirs(os.path.dirname(args.filename) or ".", exist_ok=True)  # before the long run, so a bad path fails right away
+
+    mask = create_mask(filename, class_mask=args.class_mask, nside=nside_xqml)
+
+    # Gram matrices built once and reused for every noise level
     pre0 = pilc.setup(m128, nside_sim, true_spectra_sim[1:3], lmax=32, spin=2, reg=1.0)  # reg is a placeholder
 
     noises = np.arange(0,110,10, dtype=float)
     noises[0] = 0.1  # avoid zero noise for xQML
-    sigma, bias, cl_mean, cl_std = sigma_tau_plot_parallel(noises, 200, workers=2, threads=6)  # 12 of 40 cores
+    sigma, bias, cl_mean, cl_std = sigma_tau_plot_parallel(noises, 200, threads=8)
     extra = dict(ell_bins=ell_bins_xqml, cl_mean=cl_mean, cl_std=cl_std) if args.save_spectra else {}
     np.savez(args.filename, noises=noises, sigma=sigma, bias=bias, **extra)
 
-    goal = pd.read_csv("goal_table.csv", names=['noise','sigma_tau'])
-    goal = goal[goal['noise'] <= 100]
 
-    plt.semilogx(noises, sigma, label='simulations')
-    plt.semilogx(goal['noise'], goal['sigma_tau'], label='published curve')
-    plt.xlabel("Noise (uK arcmin)")
-    plt.ylabel(r'$\sigma_{\tau}$')
-    plt.title("Full pipeline, 200 simulations per noise level")
-    plt.legend()
-    plt.savefig("sigma_tau.png")
+# usage: OMP_NUM_THREADS=8 OPENBLAS_NUM_THREADS=8 MKL_NUM_THREADS=8 python sims.py results.npz --save-spectra --class-mask
