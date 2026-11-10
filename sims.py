@@ -185,7 +185,7 @@ def ilc(nside, s, sigma_pix, npix, Nl):
     maps = np.array([combined23, combined93, combined353])
     qu = maps[:, 1:, :]
 
-    (Q, U), w1, w2 = pilc.method2_foreground_cleaning(qu, pre=pre)
+    (Q, U), w1 = pilc.method2_foreground_cleaning(qu, pre=pre)
     chat[1] = Q
     chat[2] = U
 
