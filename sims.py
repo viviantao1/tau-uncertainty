@@ -26,7 +26,7 @@ DELL = 3
 reg_sigma = 0.02 * nside_sim / nside_xqml
 
 filename = "/data/users/class/mapmaking_in/input_maps/mask/SRoll2_lowell_f060_nside16_C.fits"
-filename128 = "/data/users/class/mapmaking_in/input_maps/mask/SRoll2_lowell_f060_nside128_C.fits"
+filename128 = "/data/users/class/mapmaking_in/input_maps/mask/SRoll2_lowell_f070_nside128_C.fits"
 CACHE = "cache"   # delete this folder to force a recompute
 
 # ---------------------------------------------------------------- theory spectra
@@ -293,10 +293,10 @@ def sigma_tau_plot(noises, nsim):
     bias_tau = []
 
     for n in noises:
+        print(n)
         auto, _ = run_full_simulations(n, nside_sim, nside_xqml, 9, mask, nsim)
         sigma_tau.append(auto.std())
         bias_tau.append(auto.mean() - 0.054)
-        print(n)
 
     return np.array(sigma_tau), np.array(bias_tau)
 
@@ -331,9 +331,9 @@ if __name__ == "__main__":
     # Gram matrices built once and reused for every noise level
     pre0 = pilc.setup(m128, nside_sim, true_spectra_sim[1:3], lmax=32, spin=2, reg=1.0)  # reg is a placeholder
 
-    noises = np.arange(0,110,10, dtype=float)
+    noises = np.arange(0,105,5, dtype=float)
     noises[0] = 0.1  # avoid zero noise for xQML
-    sigma, bias, cl_mean, cl_std = sigma_tau_plot_parallel(noises, 200, threads=8)
+    sigma, bias, cl_mean, cl_std = sigma_tau_plot_parallel(noises, 400, threads=8)
     extra = dict(ell_bins=ell_bins_xqml, cl_mean=cl_mean, cl_std=cl_std) if args.save_spectra else {}
     np.savez(args.filename, noises=noises, sigma=sigma, bias=bias, **extra)
 
