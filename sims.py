@@ -172,24 +172,25 @@ def original_ilc(nside, s, sigma_pix, npix, Nl):
     return chat, Nl_eff
 
 def ilc(nside, s, sigma_pix, npix, Nl):
-    n = np.random.randn(3, npix) * sigma_pix * np.array([[0.], [1.], [1.]])  # independent Q,U noise; T = 0
+    # two noise splits; one set of weights, fit on their mean with the noise term removed via the half-difference
+    n1 = np.random.randn(3, npix) * sigma_pix * np.array([[0.], [1.], [1.]])  # independent Q,U noise; T = 0
+    n2 = np.random.randn(3, npix) * sigma_pix * np.array([[0.], [1.], [1.]])
 
     combined23 = s + total23
-    combined93 = s + total93 + n
+    combined93 = s + total93 + (n1 + n2) / 2 # make n1, n2 into array for noise in different channels
     combined353 = s + total353
 
-    chat = np.empty((3, npix))
-    chat[0] = np.zeros(npix)
-    Nl_eff = np.zeros(3)
-
+    mean_clean = np.zeros((3, npix))
     maps = np.array([combined23, combined93, combined353])
     qu = maps[:, 1:, :]
 
-    (Q, U), w1 = pilc.method2_foreground_cleaning(qu, pre=pre)
-    chat[1] = Q
-    chat[2] = U
+    half_diff = np.zeros_like(qu)
+    half_diff[1] = (n1[1:] - n2[1:]) / 2  # only 93 GHz has noise half_diff = (n1[:, 1:] - n2[:, 1:]) / 2
 
-    return chat, Nl #Nl is wrong here
+    mean_clean[1:], w1 = pilc.method2_foreground_cleaning(qu, pre=pre, half_diff=half_diff)
+    noise_clean = w1[1] * (n1 - n2) / 2 # noise_clean = np.tensordot(w1, (n1 - n2) / 2, 1)
+
+    return mean_clean + noise_clean, mean_clean - noise_clean, w1 #Nl is wrong here
 
 def generate_maps(noise, nside, foregrounds=True):
     # generates sims with foregrounds
@@ -197,10 +198,7 @@ def generate_maps(noise, nside, foregrounds=True):
     s = hp.synfast(true_spectra_sim, nside, lmax=lmax_sim, new=True, pol=True)
 
     if foregrounds:
-        m1, Nl1 = ilc(nside, s, sigma_pix, npix, Nl)
-        m2, Nl2 = ilc(nside, s, sigma_pix, npix, Nl)
-
-        return m1, m2, Nl1, Nl2
+        return ilc(nside, s, sigma_pix, npix, Nl)
     else:
         n1 = np.random.randn(3, npix) * sigma_pix * np.array([[0.], [1.], [1.]])  # independent Q,U noise; T = 0
         n2 = np.random.randn(3, npix) * sigma_pix * np.array([[0.], [1.], [1.]])  # independent Q,U noise; T = 0
@@ -208,7 +206,7 @@ def generate_maps(noise, nside, foregrounds=True):
         map1 = s + n1
         map2 = s + n2
 
-        return map1, map2, Nl, Nl
+        return map1, map2, Nl
 
 # ---------------------------------------------------------------- downgrading
 def downgrade_map_with_smoothing(m, fwhm, nside_out=nside_xqml,  **kwargs): # adds pixel window function
@@ -259,7 +257,7 @@ def simulation_setup(noise, mask, nside=nside_xqml, fwhm=0):
 
 def run_single_simulation(noise, nside_sim, nside_xqml, fwhm, icovariance_EE, esti, mask, xqml=True):
     # generate sims and foregrounds, then does ILC
-    map1, map2, Nl1_high, Nl2_high = generate_maps(noise, nside=nside_sim, foregrounds=True)
+    map1, map2, w1 = generate_maps(noise, nside=nside_sim, foregrounds=True)
 
     # downgrade maps to nside_xqml with smoothing
     map1_downgraded = downgrade(map1, fwhm, nside_out=nside_xqml)
